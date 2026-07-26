@@ -10,9 +10,9 @@ from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8671740800:AAGx2A5J14nn4r-T7lNypcox_p57IDCtWHg"  # Ваш токен
-CHANNEL_ID = "@gamevista1_bot"  # Username вашего канала (начинается с @)
-CHECK_INTERVAL_HOURS = 1       # Интервал автоотправки (раз в час)
+BOT_TOKEN = "8671740800:AAGx2A5J14nn4r-T7lNypcox_p57IDCtWHg"
+CHANNEL_ID = "@gamevista1_bot"
+CHECK_INTERVAL_HOURS = 1
 
 FOOTER_TEXT = "\n\n<i>Этот бот создал Эмиль, если хотите предложить улучшения пишите.</i>"
 # =============================================
@@ -29,32 +29,9 @@ scheduler = AsyncIOScheduler()
 sent_deals = set()
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
 }
-
-
-def get_exchange_rates():
-    """Получение курсов USD -> RUB и USD -> KZT"""
-    try:
-        res = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
-        if res.status_code == 200:
-            rates = res.json().get("rates", {})
-            return {
-                "RUB": rates.get("RUB", 90.0),
-                "KZT": rates.get("KZT", 450.0)
-            }
-    except Exception as e:
-        logging.error(f"Ошибка получения курсов валют: {e}")
-    return {"RUB": 90.0, "KZT": 450.0}
-
-
-def format_price(usd_price, rates):
-    """Форматирование цены в USD, RUB и KZT"""
-    if usd_price == 0:
-        return "<b>БЕСПЛАТНО</b>"
-    rub = usd_price * rates["RUB"]
-    kzt = usd_price * rates["KZT"]
-    return f"${usd_price:.2f} / {rub:.0f} ₽ / {kzt:.0f} ₸"
 
 
 def format_time_left(end_time_str):
@@ -85,7 +62,7 @@ def format_time_left(end_time_str):
 
 
 def get_epic_free_games():
-    """Бесплатные раздачи Epic Games Store с изображениями"""
+    """Бесплатные раздачи Epic Games Store"""
     url = "https://www.gamerpower.com/api/giveaways?platform=epic-games-store"
     try:
         response = requests.get(url, headers=HEADERS, timeout=10)
@@ -106,55 +83,59 @@ def get_epic_free_games():
     return []
 
 
-def get_cheapshark_deals(sort_by="Savings", count=15):
-    """Универсальная функция получения скидок Steam через CheapShark API"""
-    url = f"https://www.cheapshark.com/api/1.0/deals?storeID=1&sortBy={sort_by}&pageSize={count}"
-    rates = get_exchange_rates()
+def get_steam_kz_specials(count=20):
+    """
+    Получение НАСТОЯЩИХ региональных цен Steam для Казахстана (KZT).
+    Используется официальный API Steam Store с cc=kz.
+    """
+    url = "https://store.steampowered.com/api/featuredcategories?cc=kz&l=russian"
     try:
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
-            deals = response.json()
+            data = response.json()
+            specials_items = data.get("specials", {}).get("items", [])
+            
             results = []
-            for deal in deals:
-                deal_id = deal.get("dealID")
-                title = deal.get("title")
-                savings = round(float(deal.get("savings", 0)))
-                price_usd = float(deal.get("salePrice", 0))
-                normal_usd = float(deal.get("normalPrice", 0))
-                thumb = deal.get("thumb")
-                link = f"https://www.cheapshark.com/redirect?dealID={deal_id}"
+            for item in specials_items:
+                if not item.get("discount_expiration") and item.get("discount_percent", 0) == 0:
+                    continue
+
+                appid = item.get("id")
+                title = item.get("name")
+                discount = item.get("discount_percent", 0)
                 
-                # Получаем полноразмерный скриншот/обложку Steam по steamAppID
-                steam_appid = deal.get("steamAppID")
-                image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{steam_appid}/header.jpg" if steam_appid else thumb
+                # Цены в API передаются в тиинах (копейках тенге), делим на 100
+                final_price_kzt = item.get("final_price", 0) / 100
+                original_price_kzt = item.get("original_price", 0) / 100
+                
+                link = f"https://store.steampowered.com/app/{appid}/"
+                image_url = item.get("large_capsule_image") or item.get("header_image")
+
+                if final_price_kzt == 0:
+                    price_str = "<b>БЕСПЛАТНО</b>"
+                    normal_price_str = ""
+                else:
+                    price_str = f"{final_price_kzt:,.0f} ₸".replace(",", " ")
+                    normal_price_str = f"{original_price_kzt:,.0f} ₸".replace(",", " ")
 
                 results.append({
-                    "id": f"steam_{deal_id}",
+                    "id": f"steam_kz_{appid}",
                     "title": title,
-                    "price_usd": price_usd,
-                    "normal_usd": normal_usd,
-                    "savings": savings,
-                    "price_str": format_price(price_usd, rates),
-                    "normal_price_str": format_price(normal_usd, rates),
+                    "savings": discount,
+                    "price_kzt": final_price_kzt,
+                    "price_str": price_str,
+                    "normal_price_str": normal_price_str,
                     "link": link,
                     "image": image_url
                 })
-            return results
+            return results[:count]
     except Exception as e:
-        logging.error(f"Ошибка CheapShark API: {e}")
+        logging.error(f"Ошибка получения цен Steam KZ: {e}")
     return []
 
 
-def get_steam_early_access():
-    """Игры в раннем доступе (Early Access) со скидкой"""
-    # Выбираем популярные скидки и фильтруем по ключевым запросам
-    deals = get_cheapshark_deals(sort_by="Metacritic", count=30)
-    # Возвращаем подборку игр
-    return deals[:10]
-
-
 async def send_photo_or_text(message_or_bot, target_id, photo_url, caption):
-    """Вспомогательная функция: отправка фото с подписью (или текста, если фото не загрузилось)"""
+    """Отправка фото с подписью"""
     try:
         if isinstance(message_or_bot, Bot):
             await message_or_bot.send_photo(chat_id=target_id, photo=photo_url, caption=caption, disable_web_page_preview=False)
@@ -171,7 +152,7 @@ async def send_photo_or_text(message_or_bot, target_id, photo_url, caption):
 async def send_deals_job():
     """Автопостинг новых скидок раз в час в канал"""
     epic_games = get_epic_free_games()
-    steam_deals = get_cheapshark_deals(sort_by="Savings", count=10)
+    steam_deals = get_steam_kz_specials(count=10)
 
     # 1. Epic Games
     for game in epic_games:
@@ -187,10 +168,10 @@ async def send_deals_job():
             sent_deals.add(game["id"])
             await asyncio.sleep(2)
 
-    # 2. Steam Скидки
+    # 2. Steam KZ Скидки
     for deal in steam_deals:
         if deal["id"] not in sent_deals:
-            if deal["price_usd"] == 0:
+            if deal["price_kzt"] == 0:
                 price_info = "<b>БЕСПЛАТНО</b>"
             else:
                 price_info = (
@@ -199,7 +180,7 @@ async def send_deals_job():
                 )
 
             text = (
-                f"🏷 <b>НОВАЯ СКИДКА В STEAM!</b>\n\n"
+                f"🏷 <b>НОВАЯ СКИДКА В STEAM (Казахстан 🇰🇿)!</b>\n\n"
                 f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
                 f"💰 Цена:\n{price_info}"
                 f"{FOOTER_TEXT}"
@@ -216,12 +197,12 @@ async def send_deals_job():
 async def cmd_help(message: types.Message):
     """/help — Список всех команд"""
     text = (
-        "🤖 <b>Список всех команд бота GameVista:</b>\n\n"
+        "🤖 <b>Список всех команд бота GameVista (Регион: Казахстан 🇰🇿):</b>\n\n"
         "🔹 /test — Проверка работоспособности бота\n"
-        "🔹 /steam — Получить случайную скидку из Steam\n"
-        "🔹 /steamtop — Скидка на популярную игру в Steam\n"
-        "🔹 /steamdeal — Лучшие скидки дня в Steam\n"
-        "🔹 /steamearly — Игры в раннем доступе (Early Access) со скидкой\n"
+        "🔹 /steam — Случайная скидка из Steam (в ₸)\n"
+        "🔹 /steamtop — Скидка на популярную игру в Steam (в ₸)\n"
+        "🔹 /steamdeal — Лучшая скидка дня в Steam (в ₸)\n"
+        "🔹 /steamearly — Популярные игры со скидкой (в ₸)\n"
         "🔹 /giveaway — Актуальные бесплатные раздачи Epic Games\n"
         "🔹 /help — Показать это меню команд"
         f"{FOOTER_TEXT}"
@@ -237,16 +218,16 @@ async def cmd_test(message: types.Message):
 @dp.message(Command("steam"))
 async def cmd_steam(message: types.Message):
     """/steam — Случайная скидка"""
-    deals = get_cheapshark_deals(sort_by="Savings", count=25)
+    deals = get_steam_kz_specials(count=20)
     if not deals:
-        await message.answer(f"Не удалось получить скидки. Попробуйте еще раз.{FOOTER_TEXT}")
+        await message.answer(f"Не удалось получить скидки Steam. Попробуйте еще раз.{FOOTER_TEXT}")
         return
 
     deal = random.choice(deals)
-    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_usd"] > 0 else "<b>БЕСПЛАТНО</b>"
+    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_kzt"] > 0 else "<b>БЕСПЛАТНО</b>"
     
     text = (
-        f"🎲 <b>Случайная скидка из Steam:</b>\n\n"
+        f"🎲 <b>Случайная скидка из Steam (Казахстан 🇰🇿):</b>\n\n"
         f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
         f"💰 Цена:\n{price_info}"
         f"{FOOTER_TEXT}"
@@ -257,16 +238,16 @@ async def cmd_steam(message: types.Message):
 @dp.message(Command("steamtop"))
 async def cmd_steamtop(message: types.Message):
     """/steamtop — Скидка на популярную игру"""
-    deals = get_cheapshark_deals(sort_by="Metacritic", count=15)
+    deals = get_steam_kz_specials(count=20)
     if not deals:
-        await message.answer(f"Не удалось получить популярные скидки.{FOOTER_TEXT}")
+        await message.answer(f"Не удалось получить скидки.{FOOTER_TEXT}")
         return
 
     deal = random.choice(deals)
-    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_usd"] > 0 else "<b>БЕСПЛАТНО</b>"
+    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_kzt"] > 0 else "<b>БЕСПЛАТНО</b>"
 
     text = (
-        f"🏆 <b>Скидка на популярную игру в Steam:</b>\n\n"
+        f"🏆 <b>Скидка в Steam (Казахстан 🇰🇿):</b>\n\n"
         f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
         f"💰 Цена:\n{price_info}"
         f"{FOOTER_TEXT}"
@@ -277,17 +258,19 @@ async def cmd_steamtop(message: types.Message):
 @dp.message(Command("steamdeal"))
 async def cmd_steamdeal(message: types.Message):
     """/steamdeal — Лучшая скидка дня"""
-    deals = get_cheapshark_deals(sort_by="Savings", count=10)
+    deals = get_steam_kz_specials(count=20)
     if not deals:
-        await message.answer(f"Не удалось получить скидки дня.{FOOTER_TEXT}")
+        await message.answer(f"Не удалось получить скидки.{FOOTER_TEXT}")
         return
 
-    # Берём самую большую экономию/скидку
-    deal = deals[0]
-    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_usd"] > 0 else "<b>БЕСПЛАТНО</b>"
+    # Сортируем по проценту скидки
+    deals_sorted = sorted(deals, key=lambda x: x["savings"], reverse=True)
+    deal = deals_sorted[0]
+    
+    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_kzt"] > 0 else "<b>БЕСПЛАТНО</b>"
 
     text = (
-        f"🔥 <b>ЛУЧШАЯ СКИДКА ДНЯ В STEAM:</b>\n\n"
+        f"🔥 <b>МАКСИМАЛЬНАЯ СКИДКА В STEAM (Казахстан 🇰🇿):</b>\n\n"
         f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
         f"💰 Цена:\n{price_info}"
         f"{FOOTER_TEXT}"
@@ -297,17 +280,17 @@ async def cmd_steamdeal(message: types.Message):
 
 @dp.message(Command("steamearly"))
 async def cmd_steamearly(message: types.Message):
-    """/steamearly — Игра в раннем доступе"""
-    deals = get_steam_early_access()
+    """/steamearly — Подборка скидок"""
+    deals = get_steam_kz_specials(count=20)
     if not deals:
-        await message.answer(f"Не удалось получить игры в раннем доступе.{FOOTER_TEXT}")
+        await message.answer(f"Не удалось получить скидки.{FOOTER_TEXT}")
         return
 
     deal = random.choice(deals)
-    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_usd"] > 0 else "<b>БЕСПЛАТНО</b>"
+    price_info = f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_kzt"] > 0 else "<b>БЕСПЛАТНО</b>"
 
     text = (
-        f"🛠 <b>Игра в раннем доступе (Early Access):</b>\n\n"
+        f"🛠 <b>Отличная скидка в Steam (Казахстан 🇰🇿):</b>\n\n"
         f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
         f"💰 Цена:\n{price_info}"
         f"{FOOTER_TEXT}"
@@ -345,3 +328,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+        
