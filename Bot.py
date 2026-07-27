@@ -62,96 +62,135 @@ def format_time_left(end_time_str):
 
 def get_epic_free_games():
     """
-    Получение 100% БЕСПЛАТНЫХ раздач напрямую от Epic Games
-    через публичные прокси, обходящие сетевые блокировки DNS/Akamai.
+    Получение раздач Epic Games через GraphQL API (работает на стандартном requests без C-библиотек).
     """
-    egs_url = "https://store-site-backend-static-ipv4.akamaized.net/freeGamesPromotions?locale=ru&country=KZ&allowCountries=KZ"
+    url = "https://store.epicgames.com/graphql"
     
-    # Список прокси-серверов на случай проблем с сетью
-    proxies = [
-        f"https://api.allorigins.win/raw?url={requests.utils.quote(egs_url)}",
-        f"https://corsproxy.io/?{requests.utils.quote(egs_url)}",
-        egs_url  # Прямой запрос
-    ]
+    query = """
+    query freeGamesQuery($locale: String, $country: String) {
+      Catalog {
+        searchStore(locale: $locale, country: $country) {
+          elements {
+            title
+            id
+            namespace
+            description
+            productSlug
+            urlSlug
+            offerMappings {
+              pageSlug
+            }
+            promotions {
+              promotionalOffers {
+                promotionalOffers {
+                  startDate
+                  endDate
+                  discountSetting {
+                    discountType
+                    discountPercentage
+                  }
+                }
+              }
+            }
+            keyImages {
+              type
+              url
+            }
+            price {
+              totalPrice {
+                discountPrice
+                originalPrice
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    
+    payload = {
+        "query": query,
+        "variables": {"locale": "ru", "country": "KZ"}
+    }
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
 
-    data = None
-    for url in proxies:
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if "data" in data:
-                    break
-        except Exception:
-            continue
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=12)
+        if response.status_code != 200:
+            logging.error(f"EGS GraphQL вернул статус: {response.status_code}")
+            return []
 
-    if not data:
-        logging.error("Не удалось достучаться до API Epic Games ни через один источник.")
+        res_json = response.json()
+        elements = res_json.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
+        
+        free_games = []
+        for item in elements:
+            promotions = item.get("promotions")
+            if not promotions:
+                continue
+
+            offers = promotions.get("promotionalOffers", [])
+            if not offers:
+                continue
+
+            is_free = False
+            end_date = None
+
+            for offer_group in offers:
+                for offer in offer_group.get("promotionalOffers", []):
+                    discount_setting = offer.get("discountSetting", {})
+                    discount_percentage = discount_setting.get("discountPercentage")
+                    
+                    price_info = item.get("price", {}).get("totalPrice", {})
+                    discount_price = price_info.get("discountPrice")
+
+                    # Фильтруем: только со 100% скидкой (бесплатные прямо сейчас)
+                    if discount_percentage == 0 or discount_price == 0:
+                        is_free = True
+                        end_date = offer.get("endDate")
+                        break
+
+            if is_free:
+                title = item.get("title")
+                id_game = item.get("id")
+
+                page_slug = None
+                for page in item.get("offerMappings", []):
+                    if page.get("pageSlug"):
+                        page_slug = page.get("pageSlug")
+                        break
+                if not page_slug:
+                    product_slug = item.get("productSlug")
+                    page_slug = product_slug if product_slug else item.get("urlSlug")
+
+                link = f"https://store.epicgames.com/ru/p/{page_slug}" if page_slug else "https://store.epicgames.com/ru/free-games"
+
+                image_url = None
+                for img in item.get("keyImages", []):
+                    if img.get("type") in ["OfferImageWide", "DieselStoreFrontWide", "Thumbnail", "VaultClosed"]:
+                        image_url = img.get("url")
+                        break
+                if not image_url and item.get("keyImages"):
+                    image_url = item["keyImages"][0].get("url")
+
+                free_games.append({
+                    "id": f"epic_{id_game}",
+                    "title": title,
+                    "link": link,
+                    "image": image_url,
+                    "time_left": format_time_left(end_date)
+                })
+
+        return free_games
+
+    except Exception as e:
+        logging.error(f"Ошибка запроса к EGS GraphQL: {e}")
         return []
-
-    elements = data.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
-    free_games = []
-
-    for item in elements:
-        promotions = item.get("promotions")
-        if not promotions:
-            continue
-
-        offers = promotions.get("promotionalOffers", [])
-        if not offers:
-            continue
-
-        is_free = False
-        end_date = None
-
-        for offer_group in offers:
-            for offer in offer_group.get("promotionalOffers", []):
-                discount_setting = offer.get("discountSetting", {})
-                
-                # Проверяем 100% скидку
-                discount_percentage = discount_setting.get("discountPercentage")
-                discount_type = discount_setting.get("discountType")
-                
-                price_info = item.get("price", {}).get("totalPrice", {})
-                discount_price = price_info.get("discountPrice")
-
-                if discount_percentage == 0 or discount_price == 0 or discount_type == "PERCENTAGE":
-                    is_free = True
-                    end_date = offer.get("endDate")
-                    break
-
-        if is_free:
-            title = item.get("title")
-            id_game = item.get("id")
-
-            page_slug = None
-            for page in item.get("offerMappings", []):
-                if page.get("pageSlug"):
-                    page_slug = page.get("pageSlug")
-                    break
-            if not page_slug:
-                product_slug = item.get("productSlug")
-                page_slug = product_slug if product_slug else item.get("urlSlug")
-
-            link = f"https://store.epicgames.com/ru/p/{page_slug}" if page_slug else "https://store.epicgames.com/ru/free-games"
-
-            image_url = None
-            for img in item.get("keyImages", []):
-                if img.get("type") in ["OfferImageWide", "DieselStoreFrontWide", "Thumbnail", "VaultClosed"]:
-                    image_url = img.get("url")
-                    break
-            if not image_url and item.get("keyImages"):
-                image_url = item["keyImages"][0].get("url")
-
-            free_games.append({
-                "id": f"epic_{id_game}",
-                "title": title,
-                "link": link,
-                "image": image_url,
-                "time_left": format_time_left(end_date)
-            })
-
-    return free_games
 
 
 def get_steam_kz_specials(count=20):
