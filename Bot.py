@@ -2,9 +2,9 @@ import asyncio
 import logging
 import random
 import requests
-from datetime import datetime, timezone
+import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,6 +13,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 BOT_TOKEN = "8671740800:AAGx2A5J14nn4r-T7lNypcox_p57IDCtWHg"
 CHANNEL_ID = "@gamevista1_bot"
 CHECK_INTERVAL_HOURS = 1
+
+# Настройка Gemini AI
+GEMINI_API_KEY = "AQ.Ab8RN6L9ufvHxoBuIyF5eyCOqbiq-PG3-DO6SZ7pEwmdKtoPkw"
+genai.configure(api_key=GEMINI_API_KEY)
+ai_model = genai.GenerativeModel("gemini-1.5-flash")
 
 FOOTER_TEXT = "\n\n<i>Этот бот создал Эмиль, если хотите предложить улучшения пишите.</i>"
 # =============================================
@@ -33,169 +38,9 @@ HEADERS = {
 }
 
 
-def format_time_left(end_time_str):
-    """Отсчет времени до окончания раздачи"""
-    if not end_time_str:
-        return "Время завершения неизвестно"
-    try:
-        clean_date = end_time_str.replace("Z", "+00:00")
-        end_dt = datetime.fromisoformat(clean_date)
-        now = datetime.now(timezone.utc)
-        diff = end_dt - now
-        if diff.total_seconds() <= 0:
-            return "Раздача завершена"
-
-        days = diff.days
-        hours, remainder = divmod(diff.seconds, 3600)
-        minutes, _ = divmod(remainder, 60)
-
-        parts = []
-        if days > 0:
-            parts.append(f"{days} дн.")
-        if hours > 0 or days > 0:
-            parts.append(f"{hours} час.")
-        parts.append(f"{minutes} мин.")
-        return " ".join(parts)
-    except Exception:
-        return "Время завершения неизвестно"
-
-
-def get_epic_free_games():
-    """
-    Получение раздач Epic Games через GraphQL API (работает на стандартном requests без C-библиотек).
-    """
-    url = "https://store.epicgames.com/graphql"
-    
-    query = """
-    query freeGamesQuery($locale: String, $country: String) {
-      Catalog {
-        searchStore(locale: $locale, country: $country) {
-          elements {
-            title
-            id
-            namespace
-            description
-            productSlug
-            urlSlug
-            offerMappings {
-              pageSlug
-            }
-            promotions {
-              promotionalOffers {
-                promotionalOffers {
-                  startDate
-                  endDate
-                  discountSetting {
-                    discountType
-                    discountPercentage
-                  }
-                }
-              }
-            }
-            keyImages {
-              type
-              url
-            }
-            price {
-              totalPrice {
-                discountPrice
-                originalPrice
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    payload = {
-        "query": query,
-        "variables": {"locale": "ru", "country": "KZ"}
-    }
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
-
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=12)
-        if response.status_code != 200:
-            logging.error(f"EGS GraphQL вернул статус: {response.status_code}")
-            return []
-
-        res_json = response.json()
-        elements = res_json.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
-        
-        free_games = []
-        for item in elements:
-            promotions = item.get("promotions")
-            if not promotions:
-                continue
-
-            offers = promotions.get("promotionalOffers", [])
-            if not offers:
-                continue
-
-            is_free = False
-            end_date = None
-
-            for offer_group in offers:
-                for offer in offer_group.get("promotionalOffers", []):
-                    discount_setting = offer.get("discountSetting", {})
-                    discount_percentage = discount_setting.get("discountPercentage")
-                    
-                    price_info = item.get("price", {}).get("totalPrice", {})
-                    discount_price = price_info.get("discountPrice")
-
-                    # Фильтруем: только со 100% скидкой (бесплатные прямо сейчас)
-                    if discount_percentage == 0 or discount_price == 0:
-                        is_free = True
-                        end_date = offer.get("endDate")
-                        break
-
-            if is_free:
-                title = item.get("title")
-                id_game = item.get("id")
-
-                page_slug = None
-                for page in item.get("offerMappings", []):
-                    if page.get("pageSlug"):
-                        page_slug = page.get("pageSlug")
-                        break
-                if not page_slug:
-                    product_slug = item.get("productSlug")
-                    page_slug = product_slug if product_slug else item.get("urlSlug")
-
-                link = f"https://store.epicgames.com/ru/p/{page_slug}" if page_slug else "https://store.epicgames.com/ru/free-games"
-
-                image_url = None
-                for img in item.get("keyImages", []):
-                    if img.get("type") in ["OfferImageWide", "DieselStoreFrontWide", "Thumbnail", "VaultClosed"]:
-                        image_url = img.get("url")
-                        break
-                if not image_url and item.get("keyImages"):
-                    image_url = item["keyImages"][0].get("url")
-
-                free_games.append({
-                    "id": f"epic_{id_game}",
-                    "title": title,
-                    "link": link,
-                    "image": image_url,
-                    "time_left": format_time_left(end_date)
-                })
-
-        return free_games
-
-    except Exception as e:
-        logging.error(f"Ошибка запроса к EGS GraphQL: {e}")
-        return []
-
-
 def get_steam_kz_specials(count=20):
     """
-    Получение НАСТОЯЩИХ региональных цен Steam для Казахстана (KZT).
+    Получение НАСТОЯЩИХ региональных цен и акций Steam для Казахстана (KZT).
     """
     url = "https://store.steampowered.com/api/featuredcategories?cc=kz&l=russian"
     try:
@@ -206,25 +51,22 @@ def get_steam_kz_specials(count=20):
             
             results = []
             for item in specials_items:
-                if not item.get("discount_expiration") and item.get("discount_percent", 0) == 0:
+                discount = item.get("discount_percent", 0)
+                final_price_kzt = item.get("final_price", 0) / 100
+                original_price_kzt = item.get("original_price", 0) / 100
+
+                # Пропускаем товары без скидки
+                if discount == 0 and final_price_kzt > 0:
                     continue
 
                 appid = item.get("id")
                 title = item.get("name")
-                discount = item.get("discount_percent", 0)
-                
-                final_price_kzt = item.get("final_price", 0) / 100
-                original_price_kzt = item.get("original_price", 0) / 100
                 
                 link = f"https://store.steampowered.com/app/{appid}/"
                 image_url = item.get("large_capsule_image") or item.get("header_image")
 
-                if final_price_kzt == 0:
-                    price_str = "<b>БЕСПЛАТНО</b>"
-                    normal_price_str = ""
-                else:
-                    price_str = f"{final_price_kzt:,.0f} ₸".replace(",", " ")
-                    normal_price_str = f"{original_price_kzt:,.0f} ₸".replace(",", " ")
+                price_str = f"{final_price_kzt:,.0f} ₸".replace(",", " ") if final_price_kzt > 0 else "<b>БЕСПЛАТНО</b>"
+                normal_price_str = f"{original_price_kzt:,.0f} ₸".replace(",", " ") if original_price_kzt > 0 else ""
 
                 results.append({
                     "id": f"steam_kz_{appid}",
@@ -259,40 +101,21 @@ async def send_photo_or_text(message_or_bot, target_id, photo_url, caption):
 
 async def send_deals_job():
     """Автопостинг новых скидок раз в час в канал"""
-    epic_games = get_epic_free_games()
-    steam_deals = get_steam_kz_specials(count=10)
+    steam_deals = get_steam_kz_specials(count=15)
 
-    # 1. Epic Games (только новые 100% бесплатные раздачи)
-    for game in epic_games:
-        if game["id"] not in sent_deals:
-            text = (
-                f"🎁 <b>БЕСПЛАТНАЯ РАЗДАЧА В EPIC GAMES!</b>\n\n"
-                f"🎮 <b><a href='{game['link']}'>{game['title']}</a></b>\n"
-                f"💰 Цена: <b>БЕСПЛАТНО</b>\n"
-                f"⏳ Осталось до конца: <b>{game['time_left']}</b>"
-                f"{FOOTER_TEXT}"
-            )
-            await send_photo_or_text(bot, CHANNEL_ID, game["image"], text)
-            sent_deals.add(game["id"])
-            await asyncio.sleep(2)
-
-    # 2. Steam KZ Скидки
     for deal in steam_deals:
         if deal["id"] not in sent_deals:
-            if deal["price_kzt"] == 0:
-                price_info = "<b>БЕСПЛАТНО</b>"
-            else:
-                price_info = (
-                    f"<s>{deal['normal_price_str']}</s>\n"
-                    f"🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)"
-                )
-
+            price_info = (
+                "<b>БЕСПЛАТНО</b>" if deal["price_kzt"] == 0 
+                else f"<s>{deal['normal_price_str']}</s>\n🔥 <b>{deal['price_str']}</b> (-{deal['savings']}%)"
+            )
             text = (
                 f"🏷 <b>НОВАЯ СКИДКА В STEAM (Казахстан 🇰🇿)!</b>\n\n"
                 f"🎮 <b><a href='{deal['link']}'>{deal['title']}</a></b>\n"
                 f"💰 Цена:\n{price_info}"
                 f"{FOOTER_TEXT}"
             )
+
             await send_photo_or_text(bot, CHANNEL_ID, deal["image"], text)
             sent_deals.add(deal["id"])
             await asyncio.sleep(2)
@@ -306,12 +129,13 @@ async def cmd_help(message: types.Message):
     """/help — Список всех команд"""
     text = (
         "🤖 <b>Список всех команд бота GameVista (Регион: Казахстан 🇰🇿):</b>\n\n"
-        "🔹 /test — Проверка работоспособности бота\n"
+        "🔹 /steam10 — Топ 10 популярных скидок в Steam\n"
+        "🔹 /ai &lt;запрос&gt; — Задать вопрос искусственному интеллекту\n"
         "🔹 /steam — Случайная скидка из Steam (в ₸)\n"
         "🔹 /steamtop — Скидка на популярную игру в Steam (в ₸)\n"
         "🔹 /steamdeal — Лучшая скидка дня в Steam (в ₸)\n"
-        "🔹 /steamearly — Популярные игры со скидкой (в ₸)\n"
-        "🔹 /giveaway — Актуальные бесплатные раздачи Epic Games\n"
+        "🔹 /steamearly — Подборка отличных скидок (в ₸)\n"
+        "🔹 /test — Проверка работоспособности бота\n"
         "🔹 /help — Показать это меню команд"
         f"{FOOTER_TEXT}"
     )
@@ -321,6 +145,45 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("test"))
 async def cmd_test(message: types.Message):
     await message.answer(f"бот запущен{FOOTER_TEXT}")
+
+
+@dp.message(Command("steam10"))
+async def cmd_steam10(message: types.Message):
+    """/steam10 — Топ-10 популярных игр со скидками"""
+    deals = get_steam_kz_specials(count=10)
+    if not deals:
+        await message.answer(f"Не удалось получить скидки Steam.{FOOTER_TEXT}")
+        return
+
+    text = "🔥 <b>ТОП-10 ПОПУЛЯРНЫХ СКИДОК В STEAM (Казахстан 🇰🇿):</b>\n\n"
+    for idx, deal in enumerate(deals, start=1):
+        price_str = f"<b>{deal['price_str']}</b> (-{deal['savings']}%)" if deal["price_kzt"] > 0 else "<b>БЕСПЛАТНО</b>"
+        text += f"{idx}. <b><a href='{deal['link']}'>{deal['title']}</a></b> — {price_str}\n"
+
+    text += FOOTER_TEXT
+    await message.answer(text, disable_web_page_preview=True)
+
+
+@dp.message(Command("ai"))
+async def cmd_ai(message: types.Message, command: CommandObject):
+    """/ai — Запрос к ИИ"""
+    prompt = command.args
+    if not prompt:
+        await message.answer(f"Пожалуйста, напишите запрос после команды.\nПример: <code>/ai посоветуй хорошие шутеры</code>{FOOTER_TEXT}")
+        return
+
+    wait_msg = await message.answer("🤖 <i>Думаю над ответом...</i>")
+
+    try:
+        # Отправляем запрос в модель Gemini
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: ai_model.generate_content(prompt))
+        
+        reply_text = f"🤖 <b>Ответ ИИ:</b>\n\n{response.text}{FOOTER_TEXT}"
+        await wait_msg.edit_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logging.error(f"Ошибка ИИ запроса: {e}")
+        await wait_msg.edit_text(f"Произошла ошибка при обращении к ИИ: {e}{FOOTER_TEXT}")
 
 
 @dp.message(Command("steam"))
@@ -403,26 +266,6 @@ async def cmd_steamearly(message: types.Message):
         f"{FOOTER_TEXT}"
     )
     await send_photo_or_text(message, message.chat.id, deal["image"], text)
-
-
-@dp.message(Command("giveaway"))
-async def cmd_giveaway(message: types.Message):
-    """/giveaway — Текущие раздачи Epic Games"""
-    games = get_epic_free_games()
-    if not games:
-        await message.answer(f"Сейчас нет активных бесплатный раздач Epic Games.{FOOTER_TEXT}")
-        return
-
-    for game in games:
-        text = (
-            f"🎁 <b>РАЗДАЧА EPIC GAMES:</b>\n\n"
-            f"🎮 <b><a href='{game['link']}'>{game['title']}</a></b>\n"
-            f"💰 Цена: <b>БЕСПЛАТНО</b>\n"
-            f"⏳ До конца осталось: <b>{game['time_left']}</b>"
-            f"{FOOTER_TEXT}"
-        )
-        await send_photo_or_text(message, message.chat.id, game["image"], text)
-        await asyncio.sleep(1)
 
 
 async def main():
