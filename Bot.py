@@ -29,8 +29,7 @@ scheduler = AsyncIOScheduler()
 sent_deals = set()
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 }
 
 
@@ -57,36 +56,107 @@ def format_time_left(end_time_str):
             parts.append(f"{hours} час.")
         parts.append(f"{minutes} мин.")
         return " ".join(parts)
-    except Exception as e:
-        return "Не определено"
+    except Exception:
+        return "Время завершения неизвестно"
 
 
 def get_epic_free_games():
-    """Бесплатные раздачи Epic Games Store"""
-    url = "https://www.gamerpower.com/api/giveaways?platform=epic-games-store"
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            games = response.json()
-            free_games = []
-            for game in games[:5]:
-                free_games.append({
-                    "id": f"epic_{game.get('id')}",
-                    "title": game.get("title"),
-                    "link": game.get("open_giveaway_url"),
-                    "image": game.get("image"),
-                    "time_left": format_time_left(game.get("end_date"))
-                })
-            return free_games
-    except Exception as e:
-        logging.error(f"Ошибка Epic Games API: {e}")
-    return []
+    """
+    Получение 100% БЕСПЛАТНЫХ раздач напрямую от Epic Games
+    через публичные прокси, обходящие сетевые блокировки DNS/Akamai.
+    """
+    egs_url = "https://store-site-backend-static-ipv4.akamaized.net/freeGamesPromotions?locale=ru&country=KZ&allowCountries=KZ"
+    
+    # Список прокси-серверов на случай проблем с сетью
+    proxies = [
+        f"https://api.allorigins.win/raw?url={requests.utils.quote(egs_url)}",
+        f"https://corsproxy.io/?{requests.utils.quote(egs_url)}",
+        egs_url  # Прямой запрос
+    ]
+
+    data = None
+    for url in proxies:
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                if "data" in data:
+                    break
+        except Exception:
+            continue
+
+    if not data:
+        logging.error("Не удалось достучаться до API Epic Games ни через один источник.")
+        return []
+
+    elements = data.get("data", {}).get("Catalog", {}).get("searchStore", {}).get("elements", [])
+    free_games = []
+
+    for item in elements:
+        promotions = item.get("promotions")
+        if not promotions:
+            continue
+
+        offers = promotions.get("promotionalOffers", [])
+        if not offers:
+            continue
+
+        is_free = False
+        end_date = None
+
+        for offer_group in offers:
+            for offer in offer_group.get("promotionalOffers", []):
+                discount_setting = offer.get("discountSetting", {})
+                
+                # Проверяем 100% скидку
+                discount_percentage = discount_setting.get("discountPercentage")
+                discount_type = discount_setting.get("discountType")
+                
+                price_info = item.get("price", {}).get("totalPrice", {})
+                discount_price = price_info.get("discountPrice")
+
+                if discount_percentage == 0 or discount_price == 0 or discount_type == "PERCENTAGE":
+                    is_free = True
+                    end_date = offer.get("endDate")
+                    break
+
+        if is_free:
+            title = item.get("title")
+            id_game = item.get("id")
+
+            page_slug = None
+            for page in item.get("offerMappings", []):
+                if page.get("pageSlug"):
+                    page_slug = page.get("pageSlug")
+                    break
+            if not page_slug:
+                product_slug = item.get("productSlug")
+                page_slug = product_slug if product_slug else item.get("urlSlug")
+
+            link = f"https://store.epicgames.com/ru/p/{page_slug}" if page_slug else "https://store.epicgames.com/ru/free-games"
+
+            image_url = None
+            for img in item.get("keyImages", []):
+                if img.get("type") in ["OfferImageWide", "DieselStoreFrontWide", "Thumbnail", "VaultClosed"]:
+                    image_url = img.get("url")
+                    break
+            if not image_url and item.get("keyImages"):
+                image_url = item["keyImages"][0].get("url")
+
+            free_games.append({
+                "id": f"epic_{id_game}",
+                "title": title,
+                "link": link,
+                "image": image_url,
+                "time_left": format_time_left(end_date)
+            })
+
+    return free_games
 
 
 def get_steam_kz_specials(count=20):
     """
     Получение НАСТОЯЩИХ региональных цен Steam для Казахстана (KZT).
-    Используется официальный API Steam Store с cc=kz.
     """
     url = "https://store.steampowered.com/api/featuredcategories?cc=kz&l=russian"
     try:
@@ -104,7 +174,6 @@ def get_steam_kz_specials(count=20):
                 title = item.get("name")
                 discount = item.get("discount_percent", 0)
                 
-                # Цены в API передаются в тиинах (копейках тенге), делим на 100
                 final_price_kzt = item.get("final_price", 0) / 100
                 original_price_kzt = item.get("original_price", 0) / 100
                 
@@ -154,7 +223,7 @@ async def send_deals_job():
     epic_games = get_epic_free_games()
     steam_deals = get_steam_kz_specials(count=10)
 
-    # 1. Epic Games
+    # 1. Epic Games (только новые 100% бесплатные раздачи)
     for game in epic_games:
         if game["id"] not in sent_deals:
             text = (
@@ -263,7 +332,6 @@ async def cmd_steamdeal(message: types.Message):
         await message.answer(f"Не удалось получить скидки.{FOOTER_TEXT}")
         return
 
-    # Сортируем по проценту скидки
     deals_sorted = sorted(deals, key=lambda x: x["savings"], reverse=True)
     deal = deals_sorted[0]
     
@@ -303,7 +371,7 @@ async def cmd_giveaway(message: types.Message):
     """/giveaway — Текущие раздачи Epic Games"""
     games = get_epic_free_games()
     if not games:
-        await message.answer(f"Сейчас нет активных раздач Epic Games или не удалось их получить.{FOOTER_TEXT}")
+        await message.answer(f"Сейчас нет активных бесплатный раздач Epic Games.{FOOTER_TEXT}")
         return
 
     for game in games:
